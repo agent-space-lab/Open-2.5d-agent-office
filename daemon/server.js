@@ -219,6 +219,14 @@ function loadReg() {
   reg.tools = Object.keys(BUILTIN_TOOLS);
   reg.mcpServers = reg.mcpServers || {};
   reg.places = reg.places || {};  // shorthand locations: "ห้องสมุด" → folder
+  // 🧠 LLM providers: route agent sessions to a local Anthropic-compatible
+  // server (LM Studio / Ollama) instead of Anthropic. models = detected by
+  // the refresh probe (replaced wholesale); manual = user-typed (kept as-is).
+  reg.providers = reg.providers || {
+    active: "claude",   // "claude" | "lmstudio" | "ollama"
+    lmstudio: { baseUrl: "http://127.0.0.1:1234",  models: [], manual: [] },
+    ollama:   { baseUrl: "http://127.0.0.1:11434", models: [], manual: [] },
+  };
   // Default main agent: SHINO — the owner's (CEO's) second-in-command who runs
   // the floor. A manager, not an individual contributor: few hands-on tools,
   // delegation as his craft. Playful but serious about the work.
@@ -321,6 +329,7 @@ function rosterEvt() {
     socialMin: Number(reg.socialMin !== undefined ? reg.socialMin : 60),
     proposalMin: Number(reg.proposalMin !== undefined ? reg.proposalMin : 120),
     maxStaff: MAX_STAFF, staffCount: staffCount(),
+    provider: providerPub(),
     lang: reg.lang || "en" };
 }
 
@@ -402,12 +411,97 @@ function latestSession(agent) {
   return l.length ? l.reduce((a, b) => (a.ts > b.ts ? a : b)) : null;
 }
 
+// ---------------------------------------------------------------- providers
+// Office-wide LLM backend. ALL knowledge about redirecting Claude Code to a
+// local Anthropic-compatible server lives in providerEnv() — change the env
+// recipe here and every spawn site follows.
+const CLAUDE_MODELS = ["default", "fable", "opus", "sonnet", "haiku"];
+// Model ids reach the claude CLI as a `--model` arg under shell:true on
+// Windows, so a name with shell metacharacters would inject commands. Real
+// model ids are just word chars + . - : / — anything else is rejected.
+const SAFE_MODEL = /^[\w.\-:/]+$/;
+function safeModel(m) { return SAFE_MODEL.test(String(m || "")) ? String(m) : ""; }
+
+function activeProvider() {
+  const p = reg.providers || {};
+  const k = p.active || "claude";
+  return (k === "lmstudio" || k === "ollama") && p[k] ? k : "claude";
+}
+function providerModels(kind) {
+  const p = (reg.providers || {})[kind] || {};
+  return [...new Set([...(p.models || []), ...(p.manual || [])])];
+}
+// → { kind, env: {...additions}, modelArgs: ["--model", m] | [] }
+// Agent's saved pick wins if the server still has it; otherwise the first
+// known model (the office must keep working after a model is unloaded).
+function providerEnv(agentId) {
+  const kind = activeProvider();
+  const a = reg.agents[String(agentId || "").split("#")[0]] || {};
+  if (kind === "claude") {
+    const m = CLAUDE_MODELS.includes(a.model) && a.model !== "default" ? a.model : "";
+    return { kind, env: {}, modelArgs: m ? ["--model", m] : [] };
+  }
+  const cfg = reg.providers[kind];
+  const list = providerModels(kind);
+  const model = list.includes(a.model) ? a.model : (list[0] || a.model || "");
+  return { kind,
+    env: {
+      ANTHROPIC_BASE_URL: cfg.baseUrl,
+      // Official recipes: LM Studio accepts "lmstudio", Ollama "ollama".
+      ANTHROPIC_AUTH_TOKEN: kind === "ollama" ? "ollama" : "lmstudio",
+      // Don't forward a real Anthropic key to an untrusted local endpoint.
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_MODEL: model,
+      // Pin haiku-class background calls too, or they leak to Anthropic.
+      ANTHROPIC_SMALL_FAST_MODEL: model,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+    },
+    // env is shell-safe (object, not parsed); the --model ARG is not, so it's
+    // allowlisted. A rejected name still rides ANTHROPIC_MODEL in env.
+    modelArgs: safeModel(model) ? ["--model", model] : [] };
+}
+// Zero-dep model probe: LM Studio GET /v1/models → {data:[{id}]},
+// Ollama GET /api/tags → {models:[{name}]}. Short timeout — it's localhost.
+function probeProvider(kind, baseUrl, cb) {
+  let u; try { u = new URL(baseUrl); } catch { return cb(new Error("bad URL")); }
+  const lib = u.protocol === "https:" ? require("https") : http;
+  const rq = lib.request({ method: "GET", host: u.hostname,
+    port: u.port || (u.protocol === "https:" ? 443 : 80),
+    path: kind === "ollama" ? "/api/tags" : "/v1/models" }, (rs) => {
+    let o = "";
+    rs.on("data", (c) => (o += c));
+    rs.on("end", () => {
+      try {
+        const j = JSON.parse(o);
+        const models = (kind === "ollama" ? (j.models || []).map((m) => m.name)
+          : (j.data || []).map((m) => m.id))
+          .filter(Boolean).map((s) => String(s).slice(0, 120))
+          .filter((s) => SAFE_MODEL.test(s)).slice(0, 100);
+        cb(null, models);
+      } catch (e) { cb(e); }
+    });
+  });
+  rq.setTimeout(3500, () => rq.destroy(new Error("timeout")));
+  rq.on("error", (e) => cb(e));
+  rq.end();
+}
+// Public provider snapshot for the UI — config + model lists, no secrets.
+function providerPub() {
+  const p = reg.providers || {};
+  const sec = (k) => ({ baseUrl: (p[k] || {}).baseUrl || "",
+    models: providerModels(k), manual: (p[k] || {}).manual || [],
+    detected: ((p[k] || {}).models || []).length });
+  return { active: activeProvider(), claudeModels: CLAUDE_MODELS,
+    lmstudio: sec("lmstudio"), ollama: sec("ollama") };
+}
+
 // Plain headless claude call → final text (prompt drafting, reflections).
 function claudeText(prompt) {
   return new Promise((resolve) => {
-    const child = spawn("claude", ["-p"], {
+    const pe = providerEnv(null);
+    const child = spawn("claude", ["-p", ...pe.modelArgs], {
       cwd: WORKSPACE, shell: true,
-      env: { ...process.env, ...(reg.apiKeys || {}), OFFICE_ADAPTER: "1" },
+      env: { ...process.env, ...(reg.apiKeys || {}), ...pe.env, OFFICE_ADAPTER: "1" },
     });
     child.stdin.write(prompt);
     child.stdin.end();
@@ -1010,10 +1104,15 @@ function runClaude(agent, prompt, opts = {}) {
     "--settings", path.join(WORKSPACE, ".claude", "settings.json")];
   if (mcpConfig) args.push("--mcp-config", mcpConfig);
   if (entry && entry.sid) args.push("--resume", entry.sid);
+  // opts.modelAgent lets a run borrow another seat's model — CEO orders run on
+  // the Director but use the model the owner picked on YOUR AVATAR.
+  const pe = providerEnv(opts.modelAgent || agent);
+  args.push(...pe.modelArgs);
   const child = spawn("claude", args, {
     cwd,
     shell: true,
-    env: { ...process.env, ...(reg.apiKeys || {}), OFFICE_ADAPTER: "1", OFFICE_AGENT: agent, OFFICE_TASK: task },
+    // pe.env after apiKeys so a stray ANTHROPIC_* vault key can't shadow it.
+    env: { ...process.env, ...(reg.apiKeys || {}), ...pe.env, OFFICE_ADAPTER: "1", OFFICE_AGENT: agent, OFFICE_TASK: task },
   });
   // Track the run per project so the owner can stop it and take the project over.
   if (projId) {
@@ -1154,7 +1253,16 @@ SPEAK: <ประโยคพูดสั้นๆ 1 ประโยค เป�
     broadcast({ type: "chat.message", agent, task, text: "adapter error: " + e.message });
     fireDone("", false);
   });
-  child.on("close", () => fireDone(lastText, !!lastText));
+  child.on("close", () => {
+    // Local provider produced nothing → almost always "server not running".
+    // Say so plainly; we never fall back to Anthropic without consent.
+    if (!lastText && pe.kind !== "claude")
+      broadcast({ type: "chat.message", agent, task, session: entry.key,
+        text: `⚠️ ติดต่อ ${pe.kind === "lmstudio" ? "LM Studio" : "Ollama"} ไม่ได้ที่ ` +
+          `${pe.env.ANTHROPIC_BASE_URL} — เปิดเซิร์ฟเวอร์/โหลดโมเดลก่อน ` +
+          `หรือสลับกลับเป็น Claude ใน ⚙ PROVIDERS` });
+    fireDone(lastText, !!lastText);
+  });
   return task;
 }
 
@@ -1226,6 +1334,9 @@ function ceoFlow(prompt, session, project, opts = {}) {
     project,
     logPrompt: opts.logPrompt || ("👑 (CEO) " + prompt),
     filterText: makeDelegateFilter(0, session),
+    // Run the Director on the model the owner chose on YOUR AVATAR; fall back
+    // to the Director's own model only when the CEO seat has none set.
+    modelAgent: (reg.agents.ceo || {}).model ? "ceo" : undefined,
     onDone: opts.onDone,   // channels/CLI hook the reply ride-back here
   });
 }
@@ -1427,11 +1538,14 @@ function runSub(parentId, subId, taskText, entry, onDone) {
     "--allowedTools", tools,
     "--settings", path.join(WORKSPACE, ".claude", "settings.json")];
   if (mcpConfig) args.push("--mcp-config", mcpConfig);
+  // Ghosts inherit the parent's provider routing and model.
+  const pe = providerEnv(parentId);
+  args.push(...pe.modelArgs);
   // Ghosts work where their parent works (project-bound threads included).
   const subCwd = (entry.proj && projectDir(entry.proj)) || WORKSPACE;
   const child = spawn("claude", args, {
     cwd: subCwd, shell: true,
-    env: { ...process.env, ...(reg.apiKeys || {}), OFFICE_ADAPTER: "1", OFFICE_AGENT: subId, OFFICE_TASK: entry.key },
+    env: { ...process.env, ...(reg.apiKeys || {}), ...pe.env, OFFICE_ADAPTER: "1", OFFICE_AGENT: subId, OFFICE_TASK: entry.key },
   });
   child.stdin.write(
     `You are a temporary SUB-AGENT — a parallel clone of "${a.name}" (${a.role}) ` +
@@ -1453,7 +1567,7 @@ function runSub(parentId, subId, taskText, entry, onDone) {
   const watchdog = setTimeout(() => {
     try { spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { shell: true }); } catch {}
     finish(false);
-  }, 6 * 60000);
+  }, (pe.kind === "claude" ? 6 : 12) * 60000);  // local models run slower
   child.stdout.on("data", (c) => {
     buf += c;
     let i;
@@ -2288,6 +2402,8 @@ const server = http.createServer((req, res) => {
           },
           tier: Math.min(Math.max(Number(p.tier !== undefined ? p.tier : cur.tier) || 3, 1), 3),
           voice: String(p.voice !== undefined ? p.voice : cur.voice || "").slice(0, 20),
+          // Interpreted against the active provider; re-validated at spawn.
+          model: String(p.model !== undefined ? p.model : cur.model || "").slice(0, 80),
           skills: Array.isArray(p.skills) ? p.skills : cur.skills || [],
           tools: Array.isArray(p.tools) ? p.tools : cur.tools || [],
         };
@@ -2938,6 +3054,62 @@ const server = http.createServer((req, res) => {
           rq.on("error", (e) => done(false, e.message));
           rq.end();
         } else done(true, "ตั้งค่าแล้ว");
+      } catch (e) { res.writeHead(400); res.end(String(e.message)); }
+    });
+
+  } else if (req.method === "POST" && req.url === "/registry/provider") {
+    // 🧠 provider config — one endpoint, multiple intents (key-vault style):
+    //   {active}              switch the office's LLM backend
+    //   {kind, baseUrl}       repoint a local server (clears stale detections)
+    //   {kind, addModel}      add a manual model
+    //   {kind, removeModel}   remove a model from both lists
+    readBody(req, (body) => {
+      try {
+        const p = JSON.parse(body);
+        if (p.active !== undefined) {
+          if (!["claude", "lmstudio", "ollama"].includes(p.active)) throw new Error("bad provider");
+          reg.providers.active = p.active;
+        }
+        if (p.kind) {
+          if (!["lmstudio", "ollama"].includes(p.kind)) throw new Error("bad kind");
+          const cfg = reg.providers[p.kind];
+          if (p.baseUrl !== undefined) {
+            const u = String(p.baseUrl).trim().replace(/\/+$/, "").slice(0, 200);
+            if (!/^https?:\/\//.test(u)) throw new Error("baseUrl must be http(s)://…");
+            if (cfg.baseUrl !== u) { cfg.baseUrl = u; cfg.models = []; }
+          }
+          if (p.addModel) {
+            const m = String(p.addModel).trim().slice(0, 120);
+            if (m && !SAFE_MODEL.test(m)) throw new Error("model name: only letters, digits, . - : / _");
+            if (m && !cfg.manual.includes(m) && cfg.manual.length < 40) cfg.manual.push(m);
+          }
+          if (p.removeModel) {
+            cfg.manual = cfg.manual.filter((m) => m !== p.removeModel);
+            cfg.models = cfg.models.filter((m) => m !== p.removeModel);
+          }
+        }
+        saveReg();
+        pushRoster();  // provider state rides roster.sync → UI refreshes live
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, provider: providerPub() }));
+      } catch (e) { res.writeHead(400); res.end(String(e.message)); }
+    });
+
+  } else if (req.method === "POST" && req.url === "/registry/provider/refresh") {
+    // 🔄 probe the local server and replace the detected-model list.
+    readBody(req, (body) => {
+      try {
+        const { kind } = JSON.parse(body);
+        if (!["lmstudio", "ollama"].includes(kind)) throw new Error("bad kind");
+        const cfg = reg.providers[kind];
+        probeProvider(kind, cfg.baseUrl, (err, models) => {
+          res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+          if (err) return res.end(JSON.stringify({ ok: false, msg: err.message }));
+          cfg.models = models;
+          saveReg();
+          pushRoster();
+          res.end(JSON.stringify({ ok: true, models, msg: "พบ " + models.length + " โมเดล ✓" }));
+        });
       } catch (e) { res.writeHead(400); res.end(String(e.message)); }
     });
 

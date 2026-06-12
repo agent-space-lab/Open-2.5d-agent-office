@@ -1009,6 +1009,10 @@
   let BUILTIN_DESC = {}, REGMCP = {}, SOUND = true, HEARTBEAT = 0;
   let FEATURES = { openai: false, gemini: false, stt: false, tts: false, live: false, image: false };
   let TTSON = true, SOCIALMIN = 60, MAXSTAFF = 18, PROPOSALMIN = 120;
+  // LLM provider state (rides roster.sync) — feeds the editor model dropdown.
+  let PROVIDER = { active: "claude", claudeModels: ["default", "fable", "opus", "sonnet", "haiku"],
+    lmstudio: { baseUrl: "", models: [], manual: [], detected: 0 },
+    ollama: { baseUrl: "", models: [], manual: [], detected: 0 } };
   let PROJECTS_CACHE = [];
   function npcOf(id) {
     if (ROSTER[id] && ROSTER[id].avatar) return ROSTER[id].avatar;
@@ -1991,10 +1995,110 @@
     }
   }
 
+  // 🧠 PROVIDERS: which LLM backend the whole office runs on, plus the
+  // local-server config (base URL, detected/manual model lists).
+  async function renderProvidersTab() {
+    const regAll = await fetch("/registry").then((x) => x.json()).catch(() => ({}));
+    const box = modalCard.querySelector("#provbox");
+    if (!box) return;  // tab switched away while loading
+    const prov = regAll.providers || {};
+    const act = ["lmstudio", "ollama"].includes(prov.active) ? prov.active : "claude";
+    const CARDS = [
+      ["claude", "🤖 Claude (Anthropic)",
+        "ใช้บัญชี Claude Code ของคุณตามปกติ — เลือกโมเดล default / fable / opus / sonnet / haiku รายตัวได้"],
+      ["lmstudio", "🖥 LM Studio",
+        "เซิร์ฟเวอร์ LLM ในเครื่อง — เปิด LM Studio แล้วกด Start Server (ต้อง v0.4.1+ · พอร์ต 1234)"],
+      ["ollama", "🦙 Ollama",
+        "เซิร์ฟเวอร์ LLM ในเครื่อง — รัน ollama serve (ต้อง v0.14+ · พอร์ต 11434)"],
+    ];
+    box.innerHTML = "";
+    for (const [kind, title, hint] of CARDS) {
+      const cfg = prov[kind] || {};
+      const on = act === kind;
+      const card = document.createElement("div");
+      card.className = "field";
+      card.style.cssText = "border:1px solid " + (on ? "var(--accent)" : "var(--line)") +
+        ";border-radius:10px;padding:9px;margin-bottom:9px";
+      card.innerHTML =
+        `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <b style="font-size:12.5px">${title}</b>
+          ${on ? `<span style="font-size:10px;color:#4ade80">● กำลังใช้งาน</span>`
+             : `<button class="bigbtn" data-a="use"
+                  style="margin-left:auto;width:auto;flex:0 0 auto;padding:4px 12px;margin-top:0">ใช้ตัวนี้</button>`}
+        </div>
+        <div style="font-size:10.5px;color:var(--dim);margin-bottom:6px">${hint}</div>`;
+      const useBtn = card.querySelector('[data-a="use"]');
+      if (useBtn) useBtn.onclick = () =>
+        api("/registry/provider", { active: kind }).then(() => openSettings("providers"));
+      if (kind !== "claude") {
+        // base URL row
+        const urlRow = document.createElement("div");
+        urlRow.className = "assistrow";
+        urlRow.style.marginBottom = "6px";
+        urlRow.innerHTML =
+          `<input data-f="url" placeholder="Base URL" value="${(cfg.baseUrl || "").replace(/"/g, "&quot;")}">
+           <button class="sparkle" data-a="saveurl" title="บันทึก URL">💾</button>`;
+        urlRow.querySelector('[data-a="saveurl"]').onclick = () => {
+          const u = urlRow.querySelector("input").value.trim();
+          if (u) api("/registry/provider", { kind, baseUrl: u }).then(() => openSettings("providers"));
+        };
+        card.appendChild(urlRow);
+        // refresh row: probe the server, replace detected models
+        const refRow = document.createElement("div");
+        refRow.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:6px";
+        refRow.innerHTML =
+          `<button class="bigbtn" data-a="refresh" style="margin-top:0">🔄 ตรวจหาโมเดล</button>
+           <span class="kstat" style="font-size:10.5px;color:var(--dim)"></span>`;
+        const stat = refRow.querySelector(".kstat");
+        refRow.querySelector('[data-a="refresh"]').onclick = async () => {
+          stat.textContent = "🔄 กำลังตรวจ…";
+          const r = await api("/registry/provider/refresh", { kind });
+          stat.textContent = (r.ok ? "✅ " : "❌ ") + (r.msg || "");
+          stat.style.color = r.ok ? "#4ade80" : "#ff6258";
+          if (r.ok) setTimeout(() => openSettings("providers"), 700);
+        };
+        card.appendChild(refRow);
+        // model chips: detected = plain, manual = removable (✕)
+        const manual = cfg.manual || [];
+        const all = [...new Set([...(cfg.models || []), ...manual])];
+        const chips = document.createElement("div");
+        chips.style.cssText = "display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px";
+        if (!all.length) chips.innerHTML =
+          `<span style="font-size:10.5px;color:var(--dim)">ยังไม่พบโมเดล — กด 🔄 หรือเพิ่มเอง</span>`;
+        for (const m of all) {
+          const isManual = manual.includes(m);
+          const c = document.createElement("div");
+          c.className = "chk";
+          c.style.cursor = isManual ? "pointer" : "default";
+          c.textContent = m + (isManual ? " ✕" : "");
+          c.title = isManual ? "ลบโมเดลนี้" : "ตรวจพบจากเซิร์ฟเวอร์";
+          if (isManual) c.onclick = () =>
+            api("/registry/provider", { kind, removeModel: m }).then(() => openSettings("providers"));
+          chips.appendChild(c);
+        }
+        card.appendChild(chips);
+        // manual add
+        const addRow = document.createElement("div");
+        addRow.className = "assistrow";
+        addRow.innerHTML =
+          `<input data-f="add" placeholder="เพิ่มโมเดลเอง เช่น qwen2.5-coder-7b-instruct…">
+           <button class="sparkle" data-a="add">＋</button>`;
+        const doAdd = () => {
+          const m = addRow.querySelector("input").value.trim();
+          if (m) api("/registry/provider", { kind, addModel: m }).then(() => openSettings("providers"));
+        };
+        addRow.querySelector('[data-a="add"]').onclick = doAdd;
+        addRow.querySelector("input").onkeydown = (e) => { if (e.key === "Enter") doAdd(); };
+        card.appendChild(addRow);
+      }
+      box.appendChild(card);
+    }
+  }
+
   function openSettings(tab) {
     modal.classList.add("open");
     const T = (t, label) => `<div class="tab ${tab === t ? "on" : ""}" data-t="${t}">${label}</div>`;
-    const tabs = `<div class="tabs">${T("agents", "AGENTS")}${T("roles", "ROLES")}${T("skills", "SKILLS")}${T("tools", "TOOLS")}${T("connect", "CONNECT")}${T("threads", "THREADS")}</div>`;
+    const tabs = `<div class="tabs">${T("agents", "AGENTS")}${T("roles", "ROLES")}${T("skills", "SKILLS")}${T("tools", "TOOLS")}${T("connect", "CONNECT")}${T("providers", "PROVIDERS")}${T("threads", "THREADS")}</div>`;
     let bodyHtml = "";
     if (tab === "agents") {
       bodyHtml = `<div class="switch ${SOUND ? "on" : ""}" id="sndSw">
@@ -2074,6 +2178,9 @@
           </div></div>
         <div class="field"><label>📡 CHANNELS — คุยกับออฟฟิศจากภายนอกผ่าน Director (main)</label>
           <div id="chbox"></div></div>`;
+    } else if (tab === "providers") {
+      bodyHtml = `<div style="font-size:11px;color:var(--dim);margin-bottom:8px">🧠 เลือกว่า agents ในออฟฟิศจะรันด้วยโมเดลของใคร — Claude (ค่าเริ่มต้น) หรือ LLM ในเครื่องผ่าน LM Studio / Ollama (ฟรี ไม่เสียค่า API) · เลือกโมเดลรายตัวได้ในหน้าแก้ไข agent</div>
+        <div id="provbox"></div>`;
     } else if (tab === "threads") {
       bodyHtml = `<div style="font-size:11px;color:var(--dim);margin-bottom:8px">
           ความจำสนทนาแยกตามตัว agent — คำสั่งผ่าน CEO จะอยู่กับ Claude (Director)
@@ -2226,6 +2333,8 @@
       wireFilter(modalCard.querySelector("#tFilter"), list, ml);
     } else if (tab === "connect") {
       renderConnectTab();
+    } else if (tab === "providers") {
+      renderProvidersTab();
     } else if (tab === "threads") {
       fetch("/sessions/all").then((x) => x.json()).then((r) => {
         const box = modalCard.querySelector("#thlist");
@@ -2376,7 +2485,10 @@
          นี่คือตัวคุณเองในออฟฟิศ — ไม่มี prompt/skills เพราะคุณคือคนสั่ง ไม่ใช่ AI 😄
          เลือกหน้าตากับชื่อได้ตามใจ</div>` : "") +
       `<div class="field"><label>AVATAR</label><div id="avGrid"></div></div>
-       <div class="field"><label>NAME</label><input id="eName" maxlength="40"></div>` +
+       <div style="display:flex;gap:8px;align-items:flex-end">
+         <div class="field" style="flex:1;min-width:0"><label>NAME</label><input id="eName" maxlength="40"></div>
+         <div class="field" style="flex:1;min-width:0"><label>🧠 MODEL — ตาม provider ที่เลือกใน ⚙ PROVIDERS</label><select id="eModel"></select></div>
+       </div>` +
       auraField +
       (isUser ? "" : aiFields) +
       `<div class="btnrow">
@@ -2530,17 +2642,35 @@
         } finally { btn.disabled = false; btn.textContent = "✨ Draft"; }
       };
     }
+    // 🧠 model picker — lists ONLY the ACTIVE provider's models (Claude's own
+    // when the provider is claude). A saved pick this provider doesn't have
+    // (a Claude model after switching to a local provider, or a model unloaded
+    // from the server) falls back to the first option — never a stale
+    // cross-provider entry.
+    const mSel = modalCard.querySelector("#eModel");
+    if (mSel) {
+      const local = PROVIDER.active !== "claude";
+      const list = local ? ((PROVIDER[PROVIDER.active] || {}).models || []) : PROVIDER.claudeModels;
+      mSel.innerHTML = "";
+      const opt = (v, label) => { const o = document.createElement("option");
+        o.value = v; o.textContent = label; mSel.appendChild(o); };
+      if (local) opt("", tr("อัตโนมัติ — ใช้โมเดลแรกที่พบ"));
+      for (const m of list) opt(m === "default" ? "" : m, m);
+      const cur = a.model || "";
+      mSel.value = [...mSel.options].some((o) => o.value === cur) ? cur : "";
+    }
     modalCard.querySelector("#eName").value = a.name;
     modalCard.querySelector("#eCancel").onclick = () => openSettings("agents");
     modalCard.querySelector("#eSave").onclick = async () => {
       const name = modalCard.querySelector("#eName").value.trim();
       if (!name) return modalCard.querySelector("#eName").focus();
       const payload = isUser
-        ? { id, name, avatar, aura: myAura }  // the CEO row keeps no AI fields
+        ? { id, name, avatar, aura: myAura, model: (modalCard.querySelector("#eModel") || {}).value || "" }
         : { id, name, role: roleSel.value, avatar, aura: myAura,
             prompt: modalCard.querySelector("#ePrompt").value,
             tier: Number(modalCard.querySelector("#eTier").value) || 3,
             voice: (modalCard.querySelector("#eVoice") || {}).value || "",
+            model: (modalCard.querySelector("#eModel") || {}).value || "",
             persona: {
               expertise: modalCard.querySelector("#eExpertise").value,
               personality: modalCard.querySelector("#ePersonality").value,
@@ -3720,6 +3850,7 @@
       SOUND = ev.sound !== false;
       HEARTBEAT = Number(ev.heartbeatMin || 0);
       if (ev.features) FEATURES = ev.features;
+      if (ev.provider) PROVIDER = ev.provider;
       TTSON = ev.tts !== false;
       SOCIALMIN = Number(ev.socialMin !== undefined ? ev.socialMin : 60);
       PROPOSALMIN = Number(ev.proposalMin !== undefined ? ev.proposalMin : 120);

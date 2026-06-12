@@ -112,6 +112,7 @@ function help() {
   row("lang [code]", "Show / set the office language (14 languages)");
   row("keys", "List configured API keys (values hidden)");
   row("key set <NAME> <value>", "Add a key · key rm <NAME> · key test [NAME]");
+  row("provider", "LLM backend · provider use <claude|lmstudio|ollama> · provider refresh");
   row("channels", "Telegram / Discord / LINE status");
   row("plugins", "Installed plugins");
   row("plugin install <git-url>", "Add a plugin · plugin remove <id>");
@@ -585,6 +586,39 @@ async function main() {
       return r && r.ok ? ok(`${name}: ${r.msg || "works"}`) : bad(`${name}: ${(r && r.msg) || "failed"}`);
     }
     return info("Usage: bagidea key <set <NAME> <value> | rm <NAME> | test [NAME]>");
+  }
+
+  if (cmd === "provider") {
+    const sub = rest[0];
+    if (sub === "use") {
+      const kind = (rest[1] || "").toLowerCase();
+      if (!["claude", "lmstudio", "ollama"].includes(kind))
+        return info("Usage: bagidea provider use <claude|lmstudio|ollama>");
+      await req("POST", "/registry/provider", { active: kind });
+      return ok(`Office now runs on ${c.bold}${kind}${c.reset}`);
+    }
+    if (sub === "refresh") {
+      const reg = await req("GET", "/registry");
+      const act = (reg.providers || {}).active;
+      const kind = (rest[1] || (act !== "claude" ? act : "")).toLowerCase();
+      if (!["lmstudio", "ollama"].includes(kind))
+        return info("Usage: bagidea provider refresh <lmstudio|ollama>");
+      info(`🔄 probing ${kind}…`);
+      const r = await req("POST", "/registry/provider/refresh", { kind });
+      return r && r.ok ? ok(`${kind}: ${(r.models || []).join(", ") || "(no models)"}`)
+        : bad(`${kind}: ${(r && r.msg) || "unreachable"}`);
+    }
+    const reg = await req("GET", "/registry");
+    const p = reg.providers || {};
+    const act = p.active || "claude";
+    console.log("");
+    for (const k of ["claude", "lmstudio", "ollama"]) {
+      const cfg = p[k] || {};
+      const models = k === "claude" ? "default, fable, opus, sonnet, haiku"
+        : [...new Set([...(cfg.models || []), ...(cfg.manual || [])])].join(", ") || c.gray + "(none — run: bagidea provider refresh " + k + ")" + c.reset;
+      console.log(`  ${act === k ? c.ok + "●" + c.reset : c.gray + "○" + c.reset} ${c.bold}${k.padEnd(9)}${c.reset}${k === "claude" ? "" : c.gray + (cfg.baseUrl || "") + c.reset + "  "}${models}`);
+    }
+    return;
   }
 
   if (cmd === "jobs") {
