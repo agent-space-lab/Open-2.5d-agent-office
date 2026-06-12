@@ -22,10 +22,12 @@ in most of what those two do, then goes further: with your permission the agents
 **actually create and finish real projects**, and even **propose and write their
 own plugins** (you approve each one) that extend the office for real.
 
-**To run it you need [Claude Code](https://claude.com/claude-code).** For the
-*full* experience, add your **Gemini + OpenAI** API keys in settings — that
-unlocks agent voices, voice commands, realtime calls and image generation, and
-the office truly comes alive.
+**To run it you need [Claude Code](https://claude.com/claude-code).** Out of the
+box the agents think with your Claude account — or point the whole office at a
+**local LLM** via **LM Studio / Ollama** (free, no API cost) and pick a model per
+agent (⚙ → PROVIDERS). For the *full* experience, add your **Gemini + OpenAI**
+API keys in settings — that unlocks agent voices, voice commands, realtime calls
+and image generation, and the office truly comes alive.
 
 🌐 **Website:** the landing page + browsable docs live in [`web/`](web/) (deployable to any static host).
 
@@ -117,14 +119,34 @@ Want your brand here and in the app's credits? **[Become a sponsor →](mailto:w
 - **🗣 16 agent voices** (♀8 · ♂8): assign one per agent; the **▶ preview introduces itself by the right gender and the office language** (no more everyone saying a female hello). Voiced agents speak short lines on their own; long read-aloud only when you ask
 - **📞 Calls**: the **main agent only** is callable (realtime Gemini Live voice) — it speaks in the voice you assigned it, or a sensible default preset
 - **📊 Dashboard** (OFFICE OPS → STATS): runs / cost / 7-day chart / busiest agents / uptime / channels / key status
-- **`bagidea` CLI**: `start`/`stop`/`restart`, `startup on|off`, `ask`/`chat`, `status`, `stats`, `agents`, `projects`, `proposals` + `proposal approve|reject <id> [note]`, `plugins` + `plugin install|remove`, `lang`, `say`/`voices`/`image`, `channels`, `keys`, `update`, `version`, and more (`bagidea --help`)
+- **`bagidea` CLI**: `start`/`stop`/`restart`, `startup on|off`, `ask`/`chat`, `status`, `stats`, `agents`, `projects`, `proposals` + `proposal approve|reject <id> [note]`, `plugins` + `plugin install|remove`, `lang`, `provider` + `provider use|refresh`, `say`/`voices`/`image`, `channels`, `keys`, `update`, `version`, and more (`bagidea --help`)
 - **Living chat head**: a drifting gradient ring that spins amber while agents work
+
+### 🧠 LLM providers — Claude or a local model (2026-06)
+- **⚙ → PROVIDERS**: choose whose models your office agents run on — **Claude**
+  (default — your Claude Code account as usual) or a **local LLM** via
+  **LM Studio** (needs v0.4.1+ · port 1234) or **Ollama** (needs v0.14+ · port
+  11434) — free, no API cost
+- **🔄 Detect models** probes the local server (`/v1/models` / `/api/tags`) and
+  lists what's loaded; anything it misses you add by hand (e.g.
+  `qwen2.5-coder-7b-instruct`)
+- **Per-agent model pick**: every agent's edit page has a 🧠 MODEL dropdown that
+  follows the active provider — `default / fable / opus / sonnet / haiku` on
+  Claude, or **Auto — first detected model** / any detected model on a local
+  server. The provider is office-wide; the model is per agent — your Director can
+  run a 12B while an intern runs a 4B
+- **Nothing is lost on local**: sessions still run through the Claude Code CLI
+  (redirected to the local server's Anthropic-compatible API), so tools, skills,
+  MCP servers, the permission broker, resumable threads and 👻 sub-agents all
+  keep working. If the server is unreachable the agent tells you in chat — it
+  **never silently falls back** to Anthropic
 
 ### 🔌 Event daemon (Layer 0 — Node.js, zero dependencies)
 - WebSocket event hub — the Godot world and the overlay UI subscribe to one stream
 - **Event journal** (`journal.jsonl`) with replay on connect: restart anything, state comes back
 - **Agent registry** (`registry.json`): persistent staff — name, job title, avatar, aura, system prompt, skills, tools. `main` (the Director — **Shino** by default: your playful-but-focused second-in-command, tuned for delegation over hands-on work) and `ceo` (you) are protected and cannot be deleted. A fresh install starts with just these two
 - **Claude Code adapter**: `POST /chat` spawns a real headless `claude -p` session with the agent's persona, assigned skills and allowed tools; stream-json output becomes world events
+- **Provider switch**: the same adapter serves `claude` (default), `lmstudio` or `ollama` — local providers redirect the CLI with `ANTHROPIC_BASE_URL`, so every capability above survives on a local model; per-agent model picks live in the registry, and ghost sub-agents get a longer watchdog on slower local models
 - **Chat threads**: every conversation is a named, resumable session (`--resume`) with its own recorded history; agents keep continuous memory by default
 - **Skills library** with **Hermes-style auto-learning**: after a completed multi-tool task, a reflection pass decides whether the work distills into a reusable skill — if so it's saved, auto-assigned, and announced in the office
 - **Tools**: per-agent allowlist over the built-in Claude Code tools, plus custom capability via **MCP servers** (name + launch command → injected with `--mcp-config`)
@@ -159,7 +181,7 @@ until you decide.
 ### 💬 Overlay (Layer 2)
 Served by the daemon at `http://127.0.0.1:8787/` — best experienced through the included **native Rust shell**:
 - **Agent rail**: every staff member with live state dots — 👑 the CEO leads in gold (that seat is you), ⭐ the Director in blue; double-click any seat for an **ID card**
-- **⚙ Office Settings**: hire/edit/delete agents (12-face avatar picker, aura picker, job titles), a **✨ prompt copilot** (type a one-line brief in any language → a drafted system prompt), skills library with the auto-learn toggle, built-in tool catalog + MCP servers, and a thread manager
+- **⚙ Office Settings**: hire/edit/delete agents (12-face avatar picker, aura picker, job titles, per-agent 🧠 model dropdown), a **✨ prompt copilot** (type a one-line brief in any language → a drafted system prompt), skills library with the auto-learn toggle, built-in tool catalog + MCP servers, a **PROVIDERS** tab (Claude / LM Studio / Ollama — base URL, 🔄 detect models, manual model chips), and a thread manager
 - **🗺 Live map**: a real orthographic floorplan render with live agent icons (face, state ring, name) — click one to chat with it
 - **🧵 Threads**: per-conversation chat panes — switching threads or agents loads that conversation's history; a thread bar shows where you are; meetings (🗣 with participant faces) and sub-agent jobs (👻 with the owner's face + ✓/✗/⏳ status) are readable forever, streaming live while they run
 - **🗣 Discussions**: launch agent-to-agent meetings
@@ -238,6 +260,7 @@ Three independent processes: the **daemon** keeps agents running even if renderi
 | Renderer | [Godot 4.6+](https://godotengine.org/download) (standard build) |
 | Daemon | [Node.js](https://nodejs.org) 18+ (no npm packages needed) |
 | Agent | [Claude Code CLI](https://claude.com/claude-code) (`claude --version` ≥ 2.x) |
+| Local models *(optional)* | [LM Studio](https://lmstudio.ai) 0.4.1+ or [Ollama](https://ollama.com) 0.14+ — run agents free on local LLMs |
 | Shell | Rust toolchain (`cargo`) — or use a browser for the overlay |
 | GPU | Anything Vulkan-capable; verified on GTX 1060 6GB |
 
@@ -374,9 +397,19 @@ node daemon\server.js
 then either write the system prompt yourself or type a one-line brief
 (any language) and hit **✨ Draft** — a real Claude call writes the persona.
 Assign skills (pick from the **9 builtin capability packs** or your own) and
-tools with chips. Everything is editable later; deleting an agent warps them out
-of the office. `main` and `ceo` are protected. The office caps at **18 staff**
-(the CEO isn't counted) — sub-agent 👻 ghosts cover parallel load beyond that.
+tools with chips, and pick its 🧠 **model** — the dropdown follows the active
+provider (⚙ → PROVIDERS). Everything is editable later; deleting an agent warps
+them out of the office. `main` and `ceo` are protected. The office caps at
+**18 staff** (the CEO isn't counted) — sub-agent 👻 ghosts cover parallel load
+beyond that.
+
+### Run it on a local LLM (free)
+Open LM Studio and click **Start Server** (v0.4.1+, port 1234) — or run
+`ollama serve` (v0.14+, port 11434). Then ⚙ → **PROVIDERS** → **Use this** on
+the matching card → **🔄 Detect models**. Done: every agent now thinks locally,
+zero API cost, and tools / permissions / sub-agents keep working exactly the
+same. Pick which model each agent uses from its edit page (**Auto** = first
+detected model), and switch the office back to Claude any time.
 
 ### Chat
 Click a face in the rail (or on the 🗺 map) and type. Each agent keeps
@@ -449,6 +482,9 @@ bagidea proposal approve|reject <id> [note]   decide (+ optional note to the tea
 bagidea plugins                   list installed plugins
 bagidea plugin install <git-url>  add a plugin · plugin remove <id>
 bagidea lang [code]               show / set the office language (14 languages)
+bagidea provider                  LLM backend status: Claude / LM Studio / Ollama + models
+bagidea provider use <kind>       switch backend (claude | lmstudio | ollama)
+bagidea provider refresh [kind]   re-detect models on the local server
 bagidea say "<text>" | voices     speak via TTS / list voice presets
 bagidea image "<prompt>"          generate an image into the office
 bagidea channels | keys           channel + API-key status
@@ -501,6 +537,8 @@ Full reference: [`docs/guide/cli.md`](docs/guide/cli.md).
 | `GET/POST /office-md` | shared OFFICE.md memory |
 | `GET /proposals` · `POST /proposals/respond` | team project pitches |
 | `POST /registry/tts` · `/registry/social` · `/registry/lang` | voice · social · language |
+| `POST /registry/provider` `{active \| kind,baseUrl \| kind,addModel \| kind,removeModel}` | LLM backend switch + local server config (state rides `roster.sync`) |
+| `POST /registry/provider/refresh` `{kind}` | detect models — probes LM Studio `/v1/models` / Ollama `/api/tags` |
 | `POST /registry/key/test` | verify a main key works |
 | `GET /plugins` · `POST /plugins/reload` · `/plugin/<id>/...` | plugin host |
 | `GET/POST /layout` | Office Editor layout (→ `layout.changed`) |
@@ -597,6 +635,7 @@ this makes them employable"*).
 - [x] **Plugin ecosystem** — core vs installed plugins, 🧮 Calculator, GitHub install, official template + example repos
 - [x] **14-language UI**, **builtin agent skill library** (9 packs), open-source clone+build installer, `bagidea restart`
 - [x] **Social groups** (3–4 agents) → plugin-oriented proposals with approve/reject notes; **main-only calls** with assigned voices
+- [x] **LLM providers** — run the office on Claude (default) or a local **LM Studio / Ollama** server; per-agent 🧠 model picks
 - [ ] Wake word; channel round-trip reports (delegate results back to the channel)
 - [ ] macOS/Linux wallpaper backends
 - [ ] Signed binary releases (skip the Rust build on install)
